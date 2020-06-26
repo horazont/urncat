@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <liburing.h>
+#include <errno.h>
 #include <stdbool.h>
 
 #define QUEUE_DEPTH (4)
@@ -49,13 +50,12 @@ int main(int argc, char **argv) {
         perror("read");
         return 1;
     }
-    struct io_uring_cqe fake_completed_read = {
+    struct io_uring_cqe last_completed_read = {
         .res = bytes_read,
         .flags = next_read_buffer << UD_FLAG_BUFFER_SHIFT,
     };
     next_read_buffer ^= 1;
 
-    struct io_uring_cqe *last_completed_read = &fake_completed_read;
     size_t read_offset = bytes_read;
     size_t write_offset = 0;
 
@@ -80,7 +80,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    while (last_completed_read != NULL) {
+    while (last_completed_read.res > 0) {
         {
             struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
             io_uring_prep_read_fixed(sqe, 0, buffers[next_read_buffer], BUFFER_SIZE, read_offset, next_read_buffer);
@@ -91,25 +91,30 @@ int main(int argc, char **argv) {
         }
 
         {
-            const int read_buffer_index = (last_completed_read->flags & UD_FLAG_BUFFER_MASK) >> UD_FLAG_BUFFER_SHIFT;
+            const int read_buffer_index = (last_completed_read.flags & UD_FLAG_BUFFER_MASK) >> UD_FLAG_BUFFER_SHIFT;
             struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
-            io_uring_prep_write_fixed(sqe, 1, buffers[read_buffer_index], last_completed_read->res, write_offset, read_buffer_index);
+            io_uring_prep_write_fixed(sqe, 1, buffers[read_buffer_index], last_completed_read.res, write_offset, read_buffer_index);
             // io_uring_prep_write(sqe, 1, buffers[read_buffer_index], last_completed_read->res, write_offset);
             sqe->flags |= IOSQE_FIXED_FILE;
-            sqe->user_data = UD_FLAG_IS_WRITE | ((size_t)last_completed_read->res);
-            read_offset += last_completed_read->res;
-            write_offset += last_completed_read->res;
-            if (last_completed_read != &fake_completed_read) {
-                io_uring_cqe_seen(&ring, last_completed_read);
-            }
+            sqe->user_data = UD_FLAG_IS_WRITE | ((size_t)last_completed_read.res);
+            read_offset += last_completed_read.res;
+            write_offset += last_completed_read.res;
         }
 
-        io_uring_submit(&ring);
+        ret = io_uring_submit_and_wait(&ring, 2);
+        if (ret < 0) {
+            perror("io_uring_submit_and_wait");
+            return 1;
+        }
 
         for (int i = 0; i < 2; ++i) {
             // wait for both read and write to complete
             struct io_uring_cqe *completed_op = NULL;
-            io_uring_wait_cqe(&ring, &completed_op);
+            ret = io_uring_wait_cqe(&ring, &completed_op);
+            if (ret < 0) {
+                perror("io_uring_wait_cqe");
+                return 1;
+            }
             /* fprintf(stderr, "op: sz=%d flags=%d ud=%llx\n",
                     completed_op->res, completed_op->flags,
                     completed_op->user_data); */
@@ -123,10 +128,8 @@ int main(int argc, char **argv) {
                 io_uring_cqe_seen(&ring, completed_op);
                 continue;
             }
-            last_completed_read = completed_op;
-            if (last_completed_read->res == 0) {
-                last_completed_read = NULL;
-            }
+            last_completed_read = *completed_op;
+            io_uring_cqe_seen(&ring, completed_op);
             // TODO: handle read errors
         }
     }
