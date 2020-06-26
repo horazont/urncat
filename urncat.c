@@ -62,20 +62,9 @@ int main(int argc, char **argv) {
     {
         int fds[2] = {STDIN_FILENO, STDOUT_FILENO};
 
-        struct iovec iovecs[2];
-        iovecs[0].iov_base = buffers[0];
-        iovecs[0].iov_len = BUFFER_SIZE;
-        iovecs[1].iov_base = buffers[1];
-        iovecs[1].iov_len = BUFFER_SIZE;
-
         ret = io_uring_register_files(&ring, fds, sizeof(fds) / sizeof(int));
         if (ret != 0) {
             perror("io_uring_register_files");
-            return 1;
-        }
-        ret = io_uring_register_buffers(&ring, iovecs, sizeof(iovecs) / sizeof(struct iovec));
-        if (ret != 0) {
-            perror("io_uring_register_buffers");
             return 1;
         }
     }
@@ -83,8 +72,7 @@ int main(int argc, char **argv) {
     while (last_completed_read.res > 0) {
         {
             struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
-            io_uring_prep_read_fixed(sqe, 0, buffers[next_read_buffer], BUFFER_SIZE, read_offset, next_read_buffer);
-            // io_uring_prep_read(sqe, 0, buffers[next_read_buffer], BUFFER_SIZE, read_offset);
+            io_uring_prep_read(sqe, 0, buffers[next_read_buffer], BUFFER_SIZE, read_offset);
             sqe->user_data = next_read_buffer << UD_FLAG_BUFFER_SHIFT;
             sqe->flags |= IOSQE_FIXED_FILE;
             next_read_buffer ^= 1;
@@ -93,8 +81,7 @@ int main(int argc, char **argv) {
         {
             const int read_buffer_index = (last_completed_read.flags & UD_FLAG_BUFFER_MASK) >> UD_FLAG_BUFFER_SHIFT;
             struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
-            io_uring_prep_write_fixed(sqe, 1, buffers[read_buffer_index], last_completed_read.res, write_offset, read_buffer_index);
-            // io_uring_prep_write(sqe, 1, buffers[read_buffer_index], last_completed_read->res, write_offset);
+            io_uring_prep_write(sqe, 1, buffers[read_buffer_index], last_completed_read.res, write_offset);
             sqe->flags |= IOSQE_FIXED_FILE;
             sqe->user_data = UD_FLAG_IS_WRITE | ((size_t)last_completed_read.res);
             read_offset += last_completed_read.res;
